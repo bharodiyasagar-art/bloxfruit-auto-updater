@@ -57,21 +57,23 @@ def parse_value(raw):
     except:
         return 0
 
-def search_json_for_fruits(data, fruit_names):
+def search_json_for_fruits(data, fruit_names, depth=0):
     results = {}
+    if depth > 10:
+        return results
     if isinstance(data, list):
         for item in data:
-            results.update(search_json_for_fruits(item, fruit_names))
+            results.update(search_json_for_fruits(item, fruit_names, depth+1))
     elif isinstance(data, dict):
         name = None
         value = None
-        for key in ("name", "title", "fruit", "item", "label"):
+        for key in ("name", "title", "fruit", "item", "label", "slug"):
             if key in data and isinstance(data[key], str):
                 candidate = data[key].strip()
                 if candidate in fruit_names:
                     name = candidate
                     break
-        for key in ("value", "price", "val", "worth", "amount", "regular", "physical"):
+        for key in ("value", "price", "val", "worth", "amount", "regular", "physical", "regularValue", "physicalValue"):
             if key in data:
                 v = parse_value(str(data[key]))
                 if v > 0:
@@ -81,64 +83,87 @@ def search_json_for_fruits(data, fruit_names):
             results[name] = value
         for v in data.values():
             if isinstance(v, (dict, list)):
-                results.update(search_json_for_fruits(v, fruit_names))
+                results.update(search_json_for_fruits(v, fruit_names, depth+1))
     return results
 
 def scrape():
-    captured_responses = []
+    captured = []
     fruit_names = list(RARITY_MAP.keys())
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        context = browser.new_context()
+        context = browser.new_context(
+            # Block ads/trackers so page loads faster and cleaner
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"}
+        )
+
+        # Block known ad/tracker domains to prevent networkidle timeout
+        def block_ads(route):
+            url = route.request.url
+            blocked = ["playwire.com", "googlesyndication", "doubleclick",
+                       "google-analytics", "facebook.net", "id5-sync.com",
+                       "prebid", "ads", "analytics"]
+            if any(b in url for b in blocked):
+                route.abort()
+            else:
+                route.continue_()
+
         page = context.new_page()
+        page.route("**/*", block_ads)
 
         def handle_response(response):
             url = response.url
+            # Only capture from the site itself, not third parties
+            if "bloxfruitsvalues.com" not in url:
+                return
             ctype = response.headers.get("content-type", "")
-            if "json" in ctype or url.endswith(".json"):
+            if "json" in ctype:
                 try:
                     body = response.body()
-                    if len(body) > 500:
-                        captured_responses.append({
-                            "url": url,
-                            "body": body.decode("utf-8", errors="replace")
-                        })
-                        print(f"[CAPTURED] {url} ({len(body)} bytes)")
+                    if len(body) > 200:
+                        text = body.decode("utf-8", errors="replace")
+                        captured.append({"url": url, "body": text})
+                        print(f"[API] {url} ({len(body)} bytes)")
+                        print(f"      Preview: {text[:300]}")
                 except:
                     pass
 
         page.on("response", handle_response)
 
-        print("Loading page...")
-        page.goto(URL, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(6000)
+        print("Loading page (with ad blocking)...")
+        # Use domcontentloaded instead of networkidle — much faster
+        page.goto(URL, wait_until="domcontentloaded", timeout=30000)
 
-        # Print visible text so we can debug
+        # Wait up to 15 seconds for fruit data to appear
+        print("Waiting for fruit data to load...")
+        page.wait_for_timeout(15000)
+
+        # Print visible text so we can see what loaded
         body_text = page.inner_text("body")
-        print("\n=== VISIBLE PAGE TEXT (first 2000 chars) ===")
-        print(body_text[:2000])
+        print("\n=== VISIBLE PAGE TEXT (first 3000 chars) ===")
+        print(body_text[:3000])
         print("=== END ===\n")
 
         browser.close()
 
     results = {}
-
-    for resp in captured_responses:
+    for resp in captured:
         body = resp["body"]
+        # Try JSON parse
         try:
             data = json.loads(body)
             found = search_json_for_fruits(data, fruit_names)
             if found:
-                print(f"Found {len(found)} fruits in {resp['url']}")
+                print(f"✅ Found {len(found)} fruits in JSON: {resp['url']}")
                 results.update(found)
         except json.JSONDecodeError:
             pass
 
+        # Text search fallback
         for name in fruit_names:
             if name in body and name not in results:
                 pattern = re.compile(
-                    re.escape(name) + r'.{0,300}?([\d]{3,}[\d,]*)',
+                    re.escape(name) + r'.{0,400}?([\d]{4,}[\d,]*)',
                     re.IGNORECASE | re.DOTALL
                 )
                 m = pattern.search(body)
@@ -170,6 +195,7 @@ def update_gist(fruits):
         exit(1)
 
 if __name__ == "__main__":
+    print("Starting scrape...")
     scraped = scrape()
     print(f"\nScraped {len(scraped)} fruits: {list(scraped.keys())}")
 
@@ -182,12 +208,16 @@ if __name__ == "__main__":
             "value": value,
             "rarity": rarity
         })
+        if value > 0:
+            print(f"  ✅ {name}: {value:,}")
+        else:
+            print(f"  ❌ {name}: missing")
 
     found_count = sum(1 for f in fruits if f["value"] > 0)
-    print(f"\n{found_count}/{len(fruits)} fruits have values > 0")
+    print(f"\n{found_count}/{len(fruits)} fruits have values")
 
     if found_count == 0:
-        print("❌ No values found — share this log so I can fix the selectors!")
+        print("❌ Zero values — share the log above so it can be fixed!")
         exit(1)
 
     update_gist(fruits)
