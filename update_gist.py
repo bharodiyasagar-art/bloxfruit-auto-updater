@@ -77,7 +77,7 @@ def scrape():
 
         page.route("**/*", block_ads)
         print("Loading page...")
-        page.goto(URL, wait_until="domcontentloaded", timeout=30000)
+        page.goto(URL, wait_until="domcontentloaded", timeout=60000)
 
         # Wait for first fruit to appear
         print("Waiting for initial fruit data...")
