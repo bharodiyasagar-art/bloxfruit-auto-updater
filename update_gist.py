@@ -1,4 +1,4 @@
-import json, os, re, requests
+import json, os, requests
 from playwright.sync_api import sync_playwright
 
 GIST_ID = "b421f139c6cf695e25d461b3067ff237"
@@ -53,11 +53,10 @@ def parse_page_text(text, fruit_names):
             for j in range(i+1, min(i+15, len(lines))):
                 if lines[j] == "Value":
                     if j+1 < len(lines):
-                        val_str = lines[j+1]
-                        val = parse_value(val_str)
+                        val = parse_value(lines[j+1])
                         if val > 0:
                             results[name] = val
-                            print(f"  ✅ {name}: {val_str} → {val:,}")
+                            print(f"  ✅ {name}: {lines[j+1]} → {val:,}")
                     break
         i += 1
     return results
@@ -65,7 +64,8 @@ def parse_page_text(text, fruit_names):
 def scrape():
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page()
+        # Use a real viewport size so lazy-load triggers properly
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
 
         def block_ads(route):
             blocked = ["playwire","googlesyndication","doubleclick",
@@ -79,19 +79,45 @@ def scrape():
         print("Loading page...")
         page.goto(URL, wait_until="domcontentloaded", timeout=30000)
 
-        print("Waiting for fruit data...")
+        # Wait for first fruit to appear
+        print("Waiting for initial fruit data...")
         try:
             page.wait_for_function(
                 "document.body.innerText.includes('West Dragon')",
                 timeout=20000
             )
-            print("✅ Fruit data detected!")
+            print("✅ First fruits loaded!")
         except:
-            print("⚠️ Timed out — using whatever loaded")
+            print("⚠️ Timed out waiting — continuing anyway")
 
-        page.wait_for_timeout(3000)
+        # Scroll down slowly to trigger lazy loading of ALL fruits
+        print("Scrolling to load all fruits...")
+        last_fruit_count = 0
+        for scroll_attempt in range(20):
+            # Scroll down by one screen height
+            page.evaluate("window.scrollBy(0, window.innerHeight)")
+            page.wait_for_timeout(800)  # wait for lazy load to trigger
+
+            # Count how many fruit names are now visible
+            current_text = page.inner_text("body")
+            current_count = sum(1 for name in RARITY_MAP if name in current_text)
+            print(f"  Scroll {scroll_attempt+1}: {current_count} fruits visible")
+
+            # Stop if we have all fruits OR no new ones loaded after 3 scrolls
+            if current_count >= len(RARITY_MAP):
+                print("✅ All fruits loaded!")
+                break
+            if current_count == last_fruit_count and scroll_attempt > 3:
+                print(f"No new fruits after scroll — stopping at {current_count}")
+                break
+            last_fruit_count = current_count
+
+        # Final wait for any last renders
+        page.wait_for_timeout(2000)
         body_text = page.inner_text("body")
         browser.close()
+
+        print(f"\nTotal page text: {len(body_text)} chars")
         return body_text
 
 def update_gist(fruits):
@@ -110,7 +136,7 @@ if __name__ == "__main__":
     fruit_names = set(RARITY_MAP.keys())
     page_text = scrape()
 
-    print("\nParsing values...")
+    print("\nParsing values from page text...")
     scraped = parse_page_text(page_text, fruit_names)
     print(f"\nFound {len(scraped)}/{len(fruit_names)} fruits")
 
@@ -124,7 +150,9 @@ if __name__ == "__main__":
         })
 
     found = sum(1 for f in fruits if f["value"] > 0)
-    if found == 0:
-        print("❌ Zero values!"); exit(1)
+    print(f"{found}/{len(fruits)} fruits have values > 0")
+
+    if found < 5:
+        print("❌ Too few values found — check logs!"); exit(1)
 
     update_gist(fruits)
