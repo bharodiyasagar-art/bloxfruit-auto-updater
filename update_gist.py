@@ -46,19 +46,24 @@ def parse_value(raw):
 def parse_page_text(text, fruit_names):
     results = {}
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    i = 0
-    while i < len(lines):
-        if lines[i] in fruit_names:
-            name = lines[i]
-            for j in range(i+1, min(i+15, len(lines))):
-                if lines[j] == "Value":
-                    if j+1 < len(lines):
-                        val = parse_value(lines[j+1])
-                        if val > 0:
-                            results[name] = val
-                            print(f"  ✅ {name}: {lines[j+1]} → {val:,}")
-                    break
-        i += 1
+
+    for i, line in enumerate(lines):
+        if line not in fruit_names:
+            continue
+
+        name = line
+        # Current cards render as:
+        # Name -> Regular -> Permanent -> trading value.
+        # Keep "Value" support for the site's previous layout.
+        for j in range(i + 1, min(i + 20, len(lines))):
+            if lines[j] in {"Permanent", "Value"} and j + 1 < len(lines):
+                raw_value = lines[j + 1]
+                val = parse_value(raw_value)
+                if val > 0:
+                    results[name] = val
+                    print(f"  ✅ {name}: {raw_value} → {val:,}")
+                break
+
     return results
 
 def scrape():
